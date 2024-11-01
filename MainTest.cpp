@@ -27,6 +27,7 @@
 #include <atomic>
 #include <ctime>
 #include <vector>
+#include <mutex>
 
 #ifndef INCLUDE_STD_FILESYSTEM_EXPERIMENTAL
 #   if defined(__cpp_lib_filesystem)
@@ -72,7 +73,7 @@ using namespace std;
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // Definitions and Declarations
 ////////////////////////////////////////////////////////////////////////////////////////////////////
-#define MULTITHREADED_ENABLED 0
+#define MULTITHREADED_ENABLED 1
 
 enum class ESortType { AlphabeticalAscending, AlphabeticalDescending, LastLetterAscending };
 
@@ -82,15 +83,21 @@ public:
 };
 
 class AlphabeticalAscendingStringComparer : public IStringComparer {
+private:
+    ESortType sortType;
 public:
+	AlphabeticalAscendingStringComparer(ESortType type) : sortType(type) {}
 	virtual bool IsFirstAboveSecond(string _first, string _second);
 };
 
 void DoSingleThreaded(vector<string> _fileList, ESortType _sortType, string _outputName);
 void DoMultiThreaded(vector<string> _fileList, ESortType _sortType, string _outputName);
+
+vector<string> BubbleSort(vector<string> _listToSort, ESortType _sortType);
+vector<string> RadixSort(vector<string> _listToSort, ESortType _sortType);
+
 vector<string> ReadFile(string _fileName);
 void ThreadedReadFile(string _fileName, vector<string>* _listOut);
-vector<string> BubbleSort(vector<string> _listToSort, ESortType _sortType);
 void WriteAndPrintResults(const vector<string>& _masterStringList, string _outputName, int _clocksTaken);
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -130,13 +137,9 @@ void DoSingleThreaded(vector<string> _fileList, ESortType _sortType, string _out
 	vector<string> masterStringList;
 	for (unsigned int i = 0; i < _fileList.size(); ++i) {
 		vector<string> fileStringList = ReadFile(_fileList[i]);
-		for (unsigned int j = 0; j < fileStringList.size(); ++j) {
-			masterStringList.push_back(fileStringList[j]);
-		}
-
-		masterStringList = BubbleSort(masterStringList, _sortType);
-		_fileList.erase(_fileList.begin() + i);
+		masterStringList.insert(masterStringList.end(), fileStringList.begin(), fileStringList.end());
 	}
+	masterStringList = RadixSort(masterStringList, _sortType);
 	clock_t endTime = clock();
 
 	WriteAndPrintResults(masterStringList, _outputName, endTime - startTime);
@@ -145,14 +148,22 @@ void DoSingleThreaded(vector<string> _fileList, ESortType _sortType, string _out
 void DoMultiThreaded(vector<string> _fileList, ESortType _sortType, string _outputName) {
 	clock_t startTime = clock();
 	vector<string> masterStringList;
-	vector<thread> workerThreads(_fileList.size());
-	for (unsigned int i = 0; i < _fileList.size() - 1; ++i) {
-		workerThreads[i] = thread(ThreadedReadFile, _fileList[i], &masterStringList);
-	}
-	
-	workerThreads[workerThreads.size() - 1].join(); 
+	vector<thread> workerThreads;
+	mutex mtx;
 
-	masterStringList = BubbleSort(masterStringList, _sortType);
+    auto sortFile = [&](const string& f) {
+        vector<string> fileContents = ReadFile(f);
+        lock_guard<mutex> lock(mtx);
+        masterStringList.insert(masterStringList.end(), fileContents.begin(), fileContents.end());
+    };
+    for (const auto& f : _fileList) {
+        workerThreads.emplace_back(sortFile, f);
+    }
+	for (auto& t : workerThreads) {
+        t.join();
+    }
+
+	masterStringList = RadixSort(masterStringList, _sortType);
 	clock_t endTime = clock();
 
 	WriteAndPrintResults(masterStringList, _outputName, endTime - startTime);
@@ -163,23 +174,23 @@ void DoMultiThreaded(vector<string> _fileList, ESortType _sortType, string _outp
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 vector<string> ReadFile(string _fileName) {
 	vector<string> listOut;
-	streampos positionInFile = 0;
-	bool endOfFile = false;
-	while (!endOfFile) {
-		ifstream fileIn(_fileName, ifstream::in);
-		fileIn.seekg(positionInFile, ios::beg);
-
-		string* tempString = new string();
-		getline(fileIn, *tempString);
-
-		endOfFile = fileIn.peek() == EOF;
-		positionInFile = endOfFile ? ios::beg : fileIn.tellg();
-		if (!endOfFile)
-			listOut.push_back(*tempString);
-
-		fileIn.close();
-	}
-	return listOut; 
+    ifstream fileIn(_fileName, ifstream::in);
+    if (!fileIn) {
+		cout << endl << "File not found: " << _fileName;
+        return listOut;
+    }
+    
+    string line;
+    while (getline(fileIn, line)) {
+		// no carriage return at the end of the file made operations annoying down the line
+		if (fileIn.peek() == EOF) {
+			line += '\r';
+		}
+        listOut.push_back(line);
+    }
+    
+    fileIn.close();
+    return listOut;
 }
 
 void ThreadedReadFile(string _fileName, vector<string>* _listOut) {
@@ -190,19 +201,19 @@ void ThreadedReadFile(string _fileName, vector<string>* _listOut) {
 // Sorting
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 bool AlphabeticalAscendingStringComparer::IsFirstAboveSecond(string _first, string _second) {
-	unsigned int i = 0;
-	while (i < _first.length() && i < _second.length()) {
-		if (_first[i] < _second[i])
-			return true;
-		else if (_first[i] > _second[i])
-			return false;
-		++i;
+	if (sortType == ESortType::AlphabeticalAscending) {
+		return lexicographical_compare(_first.begin(), _first.end(), _second.begin(), _second.end());
+	} else if (sortType == ESortType::AlphabeticalDescending) {
+		return lexicographical_compare(_second.begin(), _second.end(), _first.begin(), _first.end());
+	} else {
+		// string f = tolower(_first)
+		// string f = tolower(_second)
+		return lexicographical_compare(_first.rbegin(), _first.rend(), _second.rbegin(), _second.rend());
 	}
-	return (i == _second.length());
 }
 
 vector<string> BubbleSort(vector<string> _listToSort, ESortType _sortType) {
-	AlphabeticalAscendingStringComparer* stringSorter = new AlphabeticalAscendingStringComparer();
+	AlphabeticalAscendingStringComparer* stringSorter = new AlphabeticalAscendingStringComparer(_sortType);
 	vector<string> sortedList = _listToSort;
 	for (unsigned int i = 0; i < sortedList.size() - 1; ++i) {
 		for (unsigned int j = 0; j < sortedList.size() - 1; ++j) {
@@ -215,6 +226,68 @@ vector<string> BubbleSort(vector<string> _listToSort, ESortType _sortType) {
 	}
 	return sortedList; 
 }
+
+vector<string> RadixSort(vector<string> _listToSort, ESortType _sortType) {
+	if (_listToSort.empty()) return _listToSort;
+	vector<string> sortedList = _listToSort;
+
+    size_t maxLen = 0;
+    for (auto& s : sortedList) {
+        maxLen = max(maxLen, s.size());
+    }
+	
+    for (int i = maxLen - 1; i >= 0; --i) {
+        vector<vector<string>> buckets(27);
+		if (_sortType == ESortType::LastLetterAscending) {
+			buckets.resize(53);
+		}
+
+        for (const auto& s : sortedList) {
+			char letter;
+			int bucket;
+            if (_sortType == ESortType::LastLetterAscending) {
+				// for last letter ascending, letters go in buckets back-to-front
+				// also have to account for output being uppercase sensitive
+				if (i < s.size()) { 
+					letter = s[s.size() - 1 - i];
+					if (letter >= 'a' && letter <= 'z') {
+						bucket = letter - 'a' + 27;
+					} else if (letter >= 'A' && letter <= 'Z') {
+						bucket = letter - 'A' + 1;
+					} else {
+						bucket = 0;
+					}
+				} else {
+					bucket = 0;
+				}
+
+				// better solution if we were doing a true alphabetical sort without intending
+				// for uppercase letters to be "smaller" than lowercase letters
+				// letter = (i < s.size()) ? tolower(s[s.size() - 1 - i]) : '\0';
+				// bucket = (letter >= 'a' && letter <= 'z') ? letter - 'a' + 1: 0;
+            } else {
+				// other sorts put letters in buckets from front-to-back
+				letter = (i < s.size()) ? tolower(s[i]) : '\0';
+				bucket = (letter >= 'a' && letter <= 'z') ? letter - 'a' + 1: 0;
+            }
+            buckets[bucket].push_back(s);
+        }
+
+        sortedList.clear();
+        if (_sortType == ESortType::AlphabeticalDescending) {
+			// read buckets backwards for descending order
+            for (int i = buckets.size() - 1; i >= 0; --i) {
+                sortedList.insert(sortedList.end(), buckets[i].begin(), buckets[i].end());
+            }
+        } else {
+            for (auto& bucket : buckets) {
+                sortedList.insert(sortedList.end(), bucket.begin(), bucket.end());
+            }
+        }
+    }
+	return sortedList;
+}
+
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // Output
